@@ -1,0 +1,15 @@
+{
+  "_note": "Contract + all three txs are built and signed OFFLINE (scripts/out/*.json). Nothing is on-chain yet: the VM shell cannot broadcast (HTTP POST, Electrum WSS and raw TCP are all blocked). Broadcast the three hexes in order from the browser, then flip deployed to true. Do not present this as deployed before the txs confirm on chipnet.",
+  "artifactFile": "NodeWatchRegistry.json",
+  "contractAddress": "bchtest:p0456dspvll05uvttsk3q4829a76m0d5t2v265qjtkn2kk3ngarq59nfvw6l5",
+  "deployed": false,
+  "network": "chipnet",
+  "registryCategoryId": "7996b0b388cf3929d8cadcffa812ca518a4b591d4f6fcb064cffbec863b22eb8",
+  "categoryId": "7996b0b388cf3929d8cadcffa812ca518a4b591d4f6fcb064cffbec863b22eb8",
+  "contractTokenAddress": "bchtest:r0456dspvll05uvttsk3q4829a76m0d5t2v265qjtkn2kk3ngarq5hq4dhmxl",
+  "contractFundingSats": 10000,
+  "genesisTxid": "6bb05691ed2b8d8674dbacf53e141ed179634fac30e9e530484e6c22ec438dc0",
+  "deployTxid": "45d0c45f749e16027d02b08feabf3aa335f46a7ec4f332eb610d3efb70ca3926",
+  "lastRegisterTxid": "cb5f072886cb7cd8c3b013df4d99b13b67b624207ae897f8ae2d42c9321eb07e",
+  "broadcastPending": true
+}

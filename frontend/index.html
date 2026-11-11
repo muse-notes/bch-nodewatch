@@ -1,0 +1,975 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BCH NodeWatch — Bitcoin Cash Node Health Dashboard</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #111; }
+  h1 { font-size: 1.6rem; margin-bottom: .2rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; }
+  .card { border: 1px solid #ddd; border-radius: 12px; padding: 1rem; }
+  .card b { display: block; font-size: 1.3rem; }
+  .card span { color: #666; font-size: .85rem; }
+  table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #eee; font-size: .9rem; }
+  input, button, select { padding: .5rem; font-size: 1rem; }
+  input, select { width: 100%; box-sizing: border-box; margin: .25rem 0; }
+  button { cursor: pointer; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .muted { color: #666; font-size: .9rem; }
+  .err { color: #b00; }
+  .ok { color: #070; }
+  .banner { border: 1px solid #e0a800; background: #fff8e1; border-radius: 12px; padding: .8rem 1rem; margin: 1rem 0; }
+  .banner.live { border-color: #2e7d32; background: #e8f5e9; }
+  .toggle { margin: .5rem 0; }
+  .toggle button { padding: .35rem .8rem; }
+  .toggle button.active { background: #111; color: #fff; }
+  .mono { font-family: ui-monospace, monospace; font-size: .85rem; word-break: break-all; }
+  .pill { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .8rem; }
+  .pill.on { background: #e8f5e9; color: #2e7d32; }
+  .pill.off { background: #fdecea; color: #b00; }
+  .pill.warn { background: #fff8e1; color: #7a5b00; }
+  #wc-qr { max-width: 220px; display: block; margin: .5rem 0; }
+  #wc-uri { width: 100%; box-sizing: border-box; }
+  details { margin-top: .5rem; }
+  summary { cursor: pointer; }
+</style>
+<!--
+  BCH NodeWatch — BCH BLAZE 2026, Mainnet Track.
+  Static page, no build step. Vanilla JS + ESM from jsDelivr (pinned versions):
+    cashscript@0.14.0, mainnet-js@3.1.7, @wizardconnect/dapp@0.2.2,
+    @wizardconnect/core@0.2.5, @bitauth/libauth@3.1.0-next.8 (address encoding).
+  Heavy wallet libraries are loaded lazily (dynamic import) only when the user
+  connects a wallet, so stats/probes keep working if a CDN module fails.
+  Deployment config (contract address, registry category ID) is read from
+  ./config.json at load; until the contract agent writes real values there,
+  every on-chain write control stays disabled with an honest "not deployed yet"
+  state. Nothing here is ever funded automatically; no real mainnet BCH moves
+  without the user signing in their own wallet.
+-->
+<script type="importmap">
+{
+  "imports": {
+    "cashscript": "https://cdn.jsdelivr.net/npm/cashscript@0.14.0/+esm",
+    "mainnet-js": "https://cdn.jsdelivr.net/npm/mainnet-js@3.1.7/+esm",
+    "@wizardconnect/dapp": "https://cdn.jsdelivr.net/npm/@wizardconnect/dapp@0.2.2/+esm",
+    "@wizardconnect/core": "https://cdn.jsdelivr.net/npm/@wizardconnect/core@0.2.5/+esm",
+    "@bitauth/libauth": "https://cdn.jsdelivr.net/npm/@bitauth/libauth@3.1.0-next.8/+esm"
+  }
+}
+</script>
+</head>
+<body>
+<h1>BCH NodeWatch</h1>
+<p class="muted">Bitcoin Cash node-health dashboard + on-chain registry of watched nodes.
+Reads need no wallet. Registering a node or attesting health is an on-chain
+write and needs a connected wallet (Paytaca via WizardConnect).</p>
+
+<div class="toggle">
+  Network:
+  <button id="net-chipnet" class="active" type="button">chipnet (testnet)</button>
+  <button id="net-mainnet" type="button">mainnet</button>
+  <span id="net-note" class="muted"></span>
+</div>
+
+<div id="deploy-banner" class="banner">
+  <b>Registry status: checking…</b>
+  <span id="deploy-detail" class="muted"></span>
+</div>
+
+<h2>Chain stats <span id="live" class="muted"></span></h2>
+<div class="grid">
+  <div class="card">Tip height<b id="stat-height">…</b><span id="stat-height-sub">—</span></div>
+  <div class="card">Mempool<b id="stat-mempool">…</b><span id="stat-mempool-sub">txs · vsize</span></div>
+  <div class="card">Fee — fast<b id="stat-fee-fast">…</b><span>sat/vB</span></div>
+  <div class="card">Fee — medium<b id="stat-fee-med">…</b><span>sat/vB</span></div>
+  <div class="card">Fee — slow<b id="stat-fee-slow">…</b><span>sat/vB</span></div>
+  <div class="card">BCH price<b id="stat-price">…</b><span id="stat-price-sub">USD</span></div>
+</div>
+<p id="stats-error" class="err"></p>
+<p class="muted">Sources: tip + mempool/fees from Chaingraph GraphQL with Satview REST
+fallback on mainnet; on chipnet (no public Chaingraph) from Electrum
+<code>blockchain.headers.subscribe</code> + <code>mempool.get_fee_histogram</code>.
+Block time is ~10 min, so stats refresh every 30 s — not every 6 s.</p>
+
+<h2>Watched nodes (on-chain registry)</h2>
+<p class="muted">Registry category: <span id="registry-cat" class="mono">not deployed yet</span></p>
+<table>
+  <thead><tr><th>#</th><th>Name</th><th>Endpoint / identifier</th><th>Owner (NFT holder)</th><th>Status</th><th>Last seen height</th><th>Latency</th></tr></thead>
+  <tbody id="nodes-body"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
+</table>
+<p id="nodes-error" class="err"></p>
+<p class="muted">Built from the registry CashToken category (one mutable NFT per node;
+holdership is the write permission) plus <code>NWATCH</code> OP_RETURN
+attestations. Refreshes every 30 s.</p>
+
+<h2>Probed infrastructure — honest node health</h2>
+<p class="muted">There is <b>no public full-node-list API for BCH</b> (no Bitnodes
+equivalent; Coin Dance publishes HTML only). This dashboard does <b>not</b>
+claim a global BCH full-node census. It probes the public Electrum/Fulcrum
+servers below for liveness, height vs. tip, and round-trip latency.</p>
+<table>
+  <thead><tr><th>Server</th><th>Status</th><th>Height</th><th>Behind tip</th><th>Latency</th><th>Version</th></tr></thead>
+  <tbody id="probes-body"><tr><td colspan="6" class="muted">Probing…</td></tr></tbody>
+</table>
+<p id="probes-error" class="err"></p>
+
+<h2>Register a node to watch</h2>
+<p class="muted">Estimated cost: <b>≈ 1,250 sats ≈ $0.0033</b> at ~$267/BCH
+(1,000-sat NFT dust output + ~250-sat fee; reference price 6 Nov 2026). The
+exact fee is computed from the built transaction and shown before you sign.
+Funding 0.01 BCH (~$2.67) covers hundreds of demos. Nothing is funded
+automatically — you sign every transaction in your own wallet.</p>
+<form id="add-form">
+  <input id="node-name" placeholder="Node name (e.g. my-electrum-01)" required maxlength="80">
+  <input id="node-endpoint" placeholder="Endpoint or identifier (e.g. wss://bch.imaginary.cash:50004)" required maxlength="120">
+  <button id="register-btn" type="submit" disabled>Register on-chain</button>
+</form>
+<p id="form-msg" class="muted">Contract not deployed yet — nothing to write to.</p>
+<details id="tx-preview-wrap" hidden>
+  <summary>Transaction preview (shown before signing)</summary>
+  <pre id="tx-preview" class="mono"></pre>
+</details>
+
+<h2>Health attest (pure OP_RETURN)</h2>
+<p class="muted">Sends a <code>NWATCH|H</code> attestation (nodeId + height + latency +
+timestamp) from your address. No contract needed — works as soon as a wallet
+is connected. Cost ≈ 200–300 sats (fee only).</p>
+<form id="attest-form">
+  <input id="attest-node" placeholder="Node (name|endpoint) or nodeId hex (40 chars)" required>
+  <input id="attest-latency" placeholder="Latency ms (optional — uses last probe)" inputmode="numeric">
+  <button id="attest-btn" type="submit" disabled>Send health attestation</button>
+</form>
+<p id="attest-msg" class="muted">Connect a wallet to attest.</p>
+
+<h2>Wallet (WizardConnect)</h2>
+<p class="muted">Connect with Paytaca first (scan the QR or open the link in the
+wallet); Selene and other WizardConnect wallets work too. The dapp never sees
+your keys — signing happens in your wallet
+(SIGHASH_ALL | SIGHASH_FORKID | SIGHASH_UTXOS).</p>
+<button id="connect-btn" type="button">Connect wallet (Paytaca / WizardConnect)</button>
+<button id="disconnect-btn" type="button" disabled>Disconnect</button>
+<p id="wallet-status" class="muted">Not connected.</p>
+<div id="wc-connect-box" hidden>
+  <img id="wc-qr" alt="WizardConnect QR code">
+  <input id="wc-uri" readonly>
+  <button id="wc-copy" type="button">Copy connection URI</button>
+</div>
+
+<script type="module">
+'use strict';
+/* ================================================================
+   Config + constants
+   ================================================================ */
+const CHAINGRAPH_URL = 'https://gql.chaingraph.pat.mn/v1/graphql';
+const SATVIEW_STATUS_URL = 'https://satview.io/bch/api/v1/status';
+const COINGECKO_PRICE_URL = 'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin-cash&vs_currencies=usd';
+const REFERENCE_BCH_USD = 267; // ~$267/BCH, 6 Nov 2026 (DESIGN.md) — used only if the live price fetch fails.
+const NWATCH_PREFIX_HEX = '4e5741544348'; // ascii "NWATCH"
+const ELECTRUM = {
+  chipnet: ['wss://chipnet.bch.ninja:50004', 'wss://chipnet.imaginary.cash:50004'],
+  mainnet: ['wss://bch.imaginary.cash:50004', 'wss://electrum.imaginary.cash:50004', 'wss://cashnode.bch.ninja:50002'],
+};
+const ELECTRUM_HOSTNAME = { chipnet: 'chipnet.imaginary.cash', mainnet: 'bch.imaginary.cash' };
+const EXPLORER_TX = {
+  chipnet: (txid) => `https://chipnet.chaingraph.cash/tx/${txid}`,
+  mainnet: (txid) => `https://blockexplorer.cash/tx/${txid}`,
+};
+const REFRESH_MS = 30000; // BCH block time is ~10 min — 30 s refresh, never 6 s.
+const PROBE_TIMEOUT_MS = 8000;
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+const state = {
+  network: 'chipnet', // default until the contract deploys on mainnet
+  config: { network: 'chipnet', contractAddress: '', registryCategoryId: '', artifactFile: 'NodeWatchRegistry.json', deployed: false },
+  artifact: null,
+  tipHeight: null,
+  bchUsd: null,
+  wallet: { connected: false, address: '', dcm: null, relayCleanup: null },
+  lastProbeLatencyMs: null,
+  nodes: [],
+};
+
+/* ================================================================
+   Small helpers
+   ================================================================ */
+const hexToBin = (hex) => {
+  const h = hex.startsWith('\\x') ? hex.slice(2) : hex;
+  const out = new Uint8Array(h.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(h.substr(i * 2, 2), 16);
+  return out;
+};
+const binToHex = (bin) => Array.from(bin, (b) => b.toString(16).padStart(2, '0')).join('');
+const ascii = (s) => new TextEncoder().encode(s);
+async function sha256(data) {
+  const buf = await crypto.subtle.digest('SHA-256', data);
+  return new Uint8Array(buf);
+}
+// nodeId = first 20 bytes of sha256(name + "|" + endpoint) — DESIGN.md
+async function nodeIdFor(name, endpoint) {
+  const hash = await sha256(ascii(`${name}|${endpoint}`));
+  return hash.slice(0, 20);
+}
+function u32be(n) {
+  const b = new Uint8Array(4);
+  new DataView(b.buffer).setUint32(0, n >>> 0, false);
+  return b;
+}
+function u16be(n) {
+  const b = new Uint8Array(2);
+  new DataView(b.buffer).setUint16(0, n & 0xffff, false);
+  return b;
+}
+function satsToUsd(sats) {
+  if (!state.bchUsd) return `≈ $${((sats / 1e8) * REFERENCE_BCH_USD).toFixed(4)} (at ~$${REFERENCE_BCH_USD}/BCH, 6 Nov 2026)`;
+  return `≈ $${((sats / 1e8) * state.bchUsd).toFixed(4)} (at $${state.bchUsd}/BCH)`;
+}
+
+async function loadConfig() {
+  try {
+    const r = await fetch('config.json', { cache: 'no-store' });
+    if (!r.ok) throw new Error('config.json not found (HTTP ' + r.status + ')');
+    const cfg = await r.json();
+    state.config = { ...state.config, ...cfg };
+  } catch (e) {
+    // No config yet — the contract agent has not landed its values.
+    console.warn('config.json unavailable:', e.message);
+  }
+  renderDeployState();
+}
+
+function renderDeployState() {
+  const c = state.config;
+  const banner = $('deploy-banner');
+  const hasContract = Boolean(c.contractAddress);
+  const hasCategory = Boolean(c.registryCategoryId);
+  // deployed:false (or broadcastPending) means the address/category are only
+  // expected future values — the txs are signed offline, nothing is on-chain.
+  // Never call it deployed on address/category alone (bug found 2026-11-08:
+  // the live page showed "deployed on chipnet" with deployed:false).
+  const isDeployed = c.deployed === true && !c.broadcastPending && hasContract && hasCategory;
+  if (isDeployed) {
+    banner.classList.add('live');
+    banner.innerHTML = `<b>Registry status: deployed on ${esc(c.network || state.network)}.</b> ` +
+      `<span class="muted">Contract <span class="mono">${esc(c.contractAddress)}</span> · ` +
+      `category <span class="mono">${esc(c.registryCategoryId.slice(0, 16))}…</span></span>`;
+    $('registry-cat').textContent = c.registryCategoryId;
+    $('register-btn').disabled = false;
+    $('form-msg').textContent = 'Ready — fill in a name and endpoint, connect your wallet, and register.';
+  } else {
+    banner.classList.remove('live');
+    const missing = [
+      !hasContract && 'contract address',
+      !hasCategory && 'registry category ID',
+    ].filter(Boolean).join(' and ');
+    const reason = missing
+      ? `still missing: ${missing}`
+      : 'contract + category are in config.json only as expected values — the three txs are signed offline and broadcast is still pending, nothing is on-chain yet';
+    const detail = $('deploy-detail');
+    if (detail) detail.textContent = `Not deployed yet — ${reason}. ` +
+      'The registry table and the on-chain register button stay disabled until the contract is deployed ' +
+      'and frontend/config.json carries the real values. Nothing here is faked.';
+    $('registry-cat').textContent = 'not deployed yet';
+    $('register-btn').disabled = true;
+    $('form-msg').textContent = 'Contract not deployed yet — nothing to write to.';
+    $('nodes-body').innerHTML =
+      '<tr><td colspan="7" class="muted">Registry not deployed yet — no category ID in config.json, so there is nothing to list.</td></tr>';
+  }
+}
+
+/* ================================================================
+   Electrum (raw WebSocket JSON-RPC) — used for stats on chipnet and
+   for probing public Electrum/Fulcrum servers on both networks.
+   ================================================================ */
+function electrumRpc(url, method, params = [], timeoutMs = PROBE_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    let ws;
+    try {
+      ws = new WebSocket(url);
+    } catch (e) { reject(e); return; }
+    const timer = setTimeout(() => { try { ws.close(); } catch (_) {} reject(new Error('timeout')); }, timeoutMs);
+    ws.onopen = () => ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }));
+    ws.onmessage = (ev) => {
+      clearTimeout(timer);
+      try { ws.close(); } catch (_) {}
+      try {
+        const j = JSON.parse(ev.data);
+        if (j.error) reject(new Error(j.error.message || JSON.stringify(j.error)));
+        else resolve(j.result);
+      } catch (e) { reject(e); }
+    };
+    ws.onerror = () => { clearTimeout(timer); reject(new Error('connection failed')); };
+    ws.onclose = (ev) => { clearTimeout(timer); if (!ev.wasClean) reject(new Error('connection closed')); };
+  });
+}
+
+async function probeServer(url) {
+  const t0 = performance.now();
+  try {
+    const [version, header] = await Promise.all([
+      electrumRpc(url, 'server.version', ['NodeWatch', '1.4']),
+      electrumRpc(url, 'blockchain.headers.subscribe', []),
+    ]);
+    const latency = Math.round(performance.now() - t0);
+    const height = header && typeof header.height === 'number' ? header.height : null;
+    return { url, ok: true, height, latencyMs: latency, version: Array.isArray(version) ? version.join(' ') : String(version ?? ''), error: '' };
+  } catch (e) {
+    return { url, ok: false, height: null, latencyMs: Math.round(performance.now() - t0), version: '', error: e.message || String(e) };
+  }
+}
+
+/* ================================================================
+   Chain stats
+   ================================================================ */
+async function chaingraph(query, variables) {
+  const r = await fetch(CHAINGRAPH_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, variables }),
+  });
+  if (!r.ok) throw new Error('Chaingraph HTTP ' + r.status);
+  const j = await r.json();
+  if (j.errors) throw new Error('Chaingraph: ' + j.errors.map((e) => e.message).join('; '));
+  return j.data;
+}
+
+async function fetchPrice() {
+  try {
+    const r = await fetch(COINGECKO_PRICE_URL);
+    const j = await r.json();
+    if (j['bitcoin-cash'] && j['bitcoin-cash'].usd) {
+      state.bchUsd = j['bitcoin-cash'].usd;
+      $('stat-price').textContent = '$' + state.bchUsd;
+      $('stat-price-sub').textContent = 'USD · CoinGecko';
+      return;
+    }
+    throw new Error('no price in response');
+  } catch (e) {
+    state.bchUsd = null;
+    $('stat-price').textContent = '$' + REFERENCE_BCH_USD;
+    $('stat-price-sub').textContent = 'USD · ref. 6 Nov 2026';
+  }
+}
+
+async function refreshStatsMainnet() {
+  // Tip from Chaingraph; mempool + fee tiers from Satview (fallback: Chaingraph tip only).
+  let tip = null;
+  try {
+    const data = await chaingraph('query { block(order_by: {height: desc}, limit: 1) { height timestamp } }');
+    tip = data.block && data.block[0] ? Number(data.block[0].height) : null;
+  } catch (e) { console.warn('Chaingraph tip failed:', e.message); }
+  try {
+    const r = await fetch(SATVIEW_STATUS_URL);
+    if (!r.ok) throw new Error('Satview HTTP ' + r.status);
+    const s = await r.json();
+    if (typeof s.tip_height === 'number') tip = s.tip_height;
+    $('stat-mempool').textContent = s.mempool_count != null ? String(s.mempool_count) : '—';
+    $('stat-mempool-sub').textContent = s.mempool_vsize != null
+      ? `txs · ${(s.mempool_vsize / 1024).toFixed(1)} kB vsize` : 'txs · vsize';
+    $('stat-fee-fast').textContent = s.fast_fee != null ? String(s.fast_fee) : '—';
+    $('stat-fee-med').textContent = s.medium_fee != null ? String(s.medium_fee) : '—';
+    $('stat-fee-slow').textContent = s.slow_fee != null ? String(s.slow_fee) : '—';
+  } catch (e) {
+    console.warn('Satview failed:', e.message);
+    if (tip == null) throw new Error('Chaingraph and Satview both failed: ' + e.message);
+    $('stat-fee-fast').textContent = '—';
+    $('stat-fee-med').textContent = '—';
+    $('stat-fee-slow').textContent = '—';
+    $('stat-mempool').textContent = '—';
+  }
+  if (tip != null) {
+    state.tipHeight = tip;
+    $('stat-height').textContent = tip.toLocaleString();
+    $('stat-height-sub').textContent = 'mainnet · Chaingraph/Satview';
+  }
+}
+
+async function refreshStatsChipnet() {
+  // No public Chaingraph GraphQL for chipnet — tip + fee histogram from Electrum.
+  const header = await electrumRpc(ELECTRUM.chipnet[0], 'blockchain.headers.subscribe', [], 10000);
+  if (!header || typeof header.height !== 'number') throw new Error('Electrum headers.subscribe gave no height');
+  state.tipHeight = header.height;
+  $('stat-height').textContent = header.height.toLocaleString();
+  $('stat-height-sub').textContent = 'chipnet · Electrum';
+  $('stat-mempool').textContent = '—';
+  $('stat-mempool-sub').textContent = 'no mempool API on chipnet';
+  try {
+    // [[feeRate sat/vB, vsize], ...] sorted by fee rate descending.
+    const hist = await electrumRpc(ELECTRUM.chipnet[0], 'mempool.get_fee_histogram', [], 10000);
+    if (Array.isArray(hist) && hist.length) {
+      const rates = hist.map((h) => h[0]).filter((x) => typeof x === 'number');
+      $('stat-fee-fast').textContent = String(Math.max(...rates));
+      $('stat-fee-med').textContent = String(rates[Math.floor(rates.length / 2)]);
+      $('stat-fee-slow').textContent = String(Math.min(...rates));
+    } else {
+      $('stat-fee-fast').textContent = '1';
+      $('stat-fee-med').textContent = '1';
+      $('stat-fee-slow').textContent = '1';
+    }
+  } catch (e) {
+    $('stat-fee-fast').textContent = '—';
+    $('stat-fee-med').textContent = '—';
+    $('stat-fee-slow').textContent = '—';
+  }
+}
+
+async function refreshStats() {
+  try {
+    if (state.network === 'mainnet') await refreshStatsMainnet();
+    else await refreshStatsChipnet();
+    $('stats-error').textContent = '';
+    $('live').textContent = '● live, updated ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    $('stats-error').textContent = 'Stats read failed: ' + (e.message || e);
+  }
+}
+
+/* ================================================================
+   Watched-nodes table (Chaingraph; mainnet only — there is no public
+   Chaingraph GraphQL for chipnet, so on chipnet the table honestly
+   reports that instead of inventing rows).
+   ================================================================ */
+function parseCommitment(hex) {
+  if (!hex) return null;
+  try {
+    const bin = hexToBin(hex);
+    if (bin.length !== 40) return null;
+    return {
+      nodeId: binToHex(bin.slice(0, 20)),
+      status: bin[20],
+      lastSeenHeight: new DataView(bin.buffer, bin.byteOffset + 21, 4).getUint32(0, false),
+      latencyMs: new DataView(bin.buffer, bin.byteOffset + 25, 2).getUint16(0, false),
+    };
+  } catch (_) { return null; }
+}
+
+// Decode a P2PKH/P2SH locking script to a cashaddr (lazy libauth import).
+async function lockingBytecodeToAddress(lockHex) {
+  try {
+    const { hash160, encodeCashAddress } = await import('@bitauth/libauth');
+    const bin = hexToBin(lockHex);
+    // P2PKH: 76 a9 14 <20B> 88 ac ; P2SH: a9 14 <20B> 87
+    let hash = null; let version = 0;
+    if (bin.length === 25 && bin[0] === 0x76 && bin[1] === 0xa9 && bin[2] === 0x14 && bin[23] === 0x88 && bin[24] === 0xac) {
+      hash = bin.slice(3, 23); version = 0;
+    } else if (bin.length === 23 && bin[0] === 0xa9 && bin[1] === 0x14 && bin[22] === 0x87) {
+      hash = bin.slice(2, 22); version = 1;
+    }
+    if (!hash) return lockHex.slice(0, 12) + '…';
+    const prefix = state.network === 'mainnet' ? 'bitcoincash' : 'bchtest';
+    return encodeCashAddress({ prefix, version, hash });
+  } catch (_) {
+    return lockHex.slice(0, 12) + '…';
+  }
+}
+
+function parseNwatchOpReturn(lockHex) {
+  // OP_RETURN script: 6a <push> 4e5741544348 "NWATCH" 01 <type> <nodeId 20B> <payload>
+  try {
+    const bin = hexToBin(lockHex);
+    if (bin.length < 10 || bin[0] !== 0x6a) return null;
+    let i = 1;
+    const pushLen = bin[i]; i++;
+    if (i + pushLen > bin.length) return null;
+    const payload = bin.slice(i, i + pushLen); i += pushLen;
+    if (binToHex(payload.slice(0, 6)) !== NWATCH_PREFIX_HEX) return null;
+    if (payload.length < 8) return null;
+    const version = payload[6];
+    const type = String.fromCharCode(payload[7]);
+    const nodeId = binToHex(payload.slice(8, 28));
+    const rest = payload.slice(28);
+    return { version, type, nodeId, rest };
+  } catch (_) { return null; }
+}
+
+async function refreshNodes() {
+  const body = $('nodes-body');
+  if (!state.config.deployed || !state.config.registryCategoryId) {
+    // renderDeployState already wrote the honest empty state.
+    return;
+  }
+  if (state.network !== 'mainnet') {
+    body.innerHTML = '<tr><td colspan="7" class="muted">Registry is on mainnet; this network is chipnet, ' +
+      'which has no public Chaingraph GraphQL. Switch to mainnet to list registered nodes.</td></tr>';
+    return;
+  }
+  try {
+    const cat = '\\x' + state.config.registryCategoryId.replace(/^\\x/, '');
+    // 1) Unspent NFT UTXOs of the registry category (filter spent client-side via spent_by).
+    const nftData = await chaingraph(
+      `query RegistryNfts($cat: bytea!) {
+        output(where: {token_category: {_eq: $cat}}, limit: 200) {
+          transaction_hash output_index value_satoshis locking_bytecode_hex
+          nonfungible_token_capability nonfungible_token_commitment
+          spent_by { outpoint_transaction_hash }
+        }
+      }`,
+      { cat },
+    );
+    // 2) NWATCH OP_RETURN attestations (register + health).
+    const opData = await chaingraph(
+      `query NwatchAttestations {
+        output(where: {locking_bytecode_pattern: {_like: "6a064e5741544348%"}}, limit: 200) {
+          transaction_hash output_index locking_bytecode_hex
+        }
+      }`,
+    );
+    const byNodeId = new Map();
+    for (const o of (nftData.output || [])) {
+      if (o.spent_by && o.spent_by.length) continue; // spent — no longer the live NFT
+      const c = parseCommitment(o.nonfungible_token_commitment);
+      if (!c) continue;
+      const entry = byNodeId.get(c.nodeId) || { nodeId: c.nodeId, name: '', endpoint: '', ownerLockHex: o.locking_bytecode_hex, status: c.status, lastSeenHeight: c.lastSeenHeight, latencyMs: c.latencyMs };
+      entry.ownerLockHex = o.locking_bytecode_hex;
+      entry.status = c.status; entry.lastSeenHeight = c.lastSeenHeight; entry.latencyMs = c.latencyMs;
+      entry.capability = o.nonfungible_token_capability;
+      byNodeId.set(c.nodeId, entry);
+    }
+    for (const o of (opData.output || [])) {
+      const p = parseNwatchOpReturn(o.locking_bytecode_hex);
+      if (!p) continue;
+      const entry = byNodeId.get(p.nodeId) || { nodeId: p.nodeId, name: '', endpoint: '', ownerLockHex: '', status: 1, lastSeenHeight: 0, latencyMs: 0 };
+      if (p.type === 'R') {
+        // rest = utf8(name) + 0x00? No — register payload is name + endpoint as UTF-8,
+        // separated by "|". (DESIGN.md: name + endpoint as UTF-8.)
+        const text = new TextDecoder().decode(p.rest);
+        const sep = text.indexOf('|');
+        if (sep >= 0) { entry.name = text.slice(0, sep); entry.endpoint = text.slice(sep + 1); }
+        else entry.name = text;
+      } else if (p.type === 'H' && p.rest.length >= 10) {
+        const dv = new DataView(p.rest.buffer, p.rest.byteOffset, p.rest.length);
+        const h = dv.getUint32(0, false);
+        const lat = dv.getUint16(4, false);
+        if (h > (entry.lastSeenHeight || 0)) { entry.lastSeenHeight = h; entry.latencyMs = lat; }
+      }
+      byNodeId.set(p.nodeId, entry);
+    }
+    state.nodes = [...byNodeId.values()];
+    if (!state.nodes.length) {
+      body.innerHTML = '<tr><td colspan="7" class="muted">Registry category has no live node NFTs and no NWATCH attestations yet.</td></tr>';
+      $('nodes-error').textContent = '';
+      return;
+    }
+    body.innerHTML = '';
+    for (let i = 0; i < state.nodes.length; i++) {
+      const n = state.nodes[i];
+      const owner = n.ownerLockHex ? await lockingBytecodeToAddress(n.ownerLockHex) : '—';
+      const statusText = n.status === 1 ? 'active' : n.status === 2 ? 'degraded' : 'unknown';
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        `<td>${i}</td>` +
+        `<td>${esc(n.name || '(unnamed)')}</td>` +
+        `<td class="mono">${esc(n.endpoint || '—')}</td>` +
+        `<td class="mono">${esc(owner.length > 22 ? owner.slice(0, 14) + '…' + owner.slice(-6) : owner)}</td>` +
+        `<td>${esc(statusText)}</td>` +
+        `<td>${n.lastSeenHeight || '—'}</td>` +
+        `<td>${n.latencyMs ? n.latencyMs + ' ms' : '—'}</td>`;
+      tr.title = 'nodeId ' + n.nodeId;
+      body.appendChild(tr);
+    }
+    $('nodes-error').textContent = '';
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="7" class="err">Registry read failed: ${esc(e.message || e)}</td></tr>`;
+  }
+}
+
+/* ================================================================
+   Probed infrastructure
+   ================================================================ */
+async function refreshProbes() {
+  const body = $('probes-body');
+  const urls = ELECTRUM[state.network];
+  body.innerHTML = '';
+  const results = await Promise.all(urls.map(probeServer));
+  let anyOk = false;
+  for (const r of results) {
+    if (r.ok) {
+      anyOk = true;
+      if (state.lastProbeLatencyMs == null) state.lastProbeLatencyMs = r.latencyMs;
+    }
+    const behind = r.ok && r.height != null && state.tipHeight != null ? state.tipHeight - r.height : null;
+    const tr = document.createElement('tr');
+    const status = r.ok
+      ? `<span class="pill on">online</span>`
+      : `<span class="pill off">unreachable</span>`;
+    const note = !r.ok && r.url.includes('cashnode.bch.ninja')
+      ? ' <span class="muted">(port 50002 is plain TLS, not WSS — browsers cannot speak raw Electrum TCP/TLS)</span>' : '';
+    tr.innerHTML =
+      `<td class="mono">${esc(r.url)}</td>` +
+      `<td>${status}${r.ok ? '' : ' <span class="err">' + esc(r.error) + '</span>' + note}</td>` +
+      `<td>${r.height != null ? r.height.toLocaleString() : '—'}</td>` +
+      `<td>${behind == null ? '—' : behind === 0 ? '0 (at tip)' : behind + ' block' + (behind === 1 ? '' : 's')}</td>` +
+      `<td>${r.latencyMs} ms</td>` +
+      `<td class="mono">${esc(r.version || '—')}</td>`;
+    body.appendChild(tr);
+  }
+  $('probes-error').textContent = anyOk ? '' : 'All probe servers unreachable from this browser — check network access to WSS endpoints.';
+}
+
+/* ================================================================
+   Wallet (WizardConnect) — lazy-loaded, Paytaca first.
+   Verified against @wizardconnect/dapp@0.2.2 + @wizardconnect/core@0.2.5:
+   initiateDappRelay(cb) -> { client, uri, qrUri, cleanup };
+   DappConnectionManager('NodeWatch'); dcm.attachRelay(relay);
+   dcm.updateConnection(client, status) in the relay status callback;
+   'walletready' event -> getPubkey(0, 0n) gives the receive-address pubkey;
+   signTransaction({ transaction: wcObject, inputPaths: [[0, 'receive', 0]] })
+   -> { signedTransaction: hex, signedTransactionHash }.
+   ================================================================ */
+let wcLibs = null;
+let csLib = null; // CashScript module, loaded lazily on first wallet use.
+async function loadWalletLibs() {
+  if (wcLibs) return wcLibs;
+  const [dapp, core, libauth] = await Promise.all([
+    import('@wizardconnect/dapp'),
+    import('@wizardconnect/core'),
+    import('@bitauth/libauth'),
+  ]);
+  wcLibs = { ...dapp, ...core, ...libauth };
+  return wcLibs;
+}
+
+async function connectWallet() {
+  const status = $('wallet-status');
+  try {
+    status.textContent = 'Loading wallet libraries (cashscript, WizardConnect)…';
+    const { DappConnectionManager, initiateDappRelay, hash160, encodeCashAddress } = await loadWalletLibs();
+    const dcm = new DappConnectionManager('NodeWatch');
+    state.wallet.dcm = dcm;
+    const relay = initiateDappRelay((client, relayStatus) => {
+      dcm.updateConnection(client, relayStatus);
+    });
+    dcm.attachRelay(relay);
+    state.wallet.relayCleanup = relay.cleanup;
+    // Show the connection offer: QR + copyable URI. The user scans it in
+    // Paytaca (preferred) or another WizardConnect wallet.
+    $('wc-connect-box').hidden = false;
+    $('wc-qr').src = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(relay.qrUri || relay.uri);
+    $('wc-uri').value = relay.uri;
+    status.textContent = 'Waiting for wallet — scan the QR in Paytaca (or open the connection URI in your wallet)…';
+    $('connect-btn').disabled = true;
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('No wallet connected within 5 minutes.')), 5 * 60 * 1000);
+      dcm.once('walletready', () => { clearTimeout(timeout); resolve(); });
+      dcm.once('disconnect', () => { clearTimeout(timeout); reject(new Error('Wallet disconnected before ready.')); });
+    });
+    // Derive the receive address (BIP44 m/44'/145'/0'/0/0) from the wallet xpub.
+    const pubkey = dcm.getPubkey(0, 0n);
+    if (!pubkey) throw new Error('Wallet connected but no receive pubkey was provided.');
+    const prefix = state.network === 'mainnet' ? 'bitcoincash' : 'bchtest';
+    const address = encodeCashAddress({ prefix, version: 0, hash: hash160(pubkey) });
+    state.wallet.connected = true;
+    state.wallet.address = address;
+    $('wallet-status').innerHTML = `Connected: <span class="mono">${esc(address)}</span> <span class="ok">●</span>`;
+    $('wc-connect-box').hidden = true;
+    $('connect-btn').disabled = true;
+    $('disconnect-btn').disabled = false;
+    $('attest-btn').disabled = false;
+    if (!state.config.deployed || !state.config.registryCategoryId) $('form-msg').textContent = 'Wallet connected, but the contract is not deployed yet — registration stays disabled.';
+    else $('form-msg').textContent = 'Wallet connected — ready to register.';
+  } catch (e) {
+    status.textContent = 'Connect failed: ' + (e.message || e);
+    $('connect-btn').disabled = false;
+  }
+}
+
+function disconnectWallet() {
+  try { state.wallet.dcm && state.wallet.dcm.destroy(); } catch (_) {}
+  try { state.wallet.relayCleanup && state.wallet.relayCleanup(); } catch (_) {}
+  state.wallet = { connected: false, address: '', dcm: null, relayCleanup: null };
+  $('wallet-status').textContent = 'Not connected.';
+  $('wc-connect-box').hidden = true;
+  $('connect-btn').disabled = false;
+  $('disconnect-btn').disabled = true;
+  $('attest-btn').disabled = true;
+}
+
+/* ================================================================
+   Transaction building (CashScript) + WizardConnect signing.
+   Flow (verified API surface, cashscript 0.14.0):
+     provider = new ElectrumNetworkProvider(network, { hostname })
+     builder  = new TransactionBuilder({ provider })
+     builder.addInput(utxo, placeholderP2PKHUnlocker(userAddress))
+     builder.addOpReturnOutput(chunks) / builder.addOutput(...)
+     builder.addBchChangeOutputIfNeeded(...) — via manual change below
+     wcObj = builder.generateWcTransactionObject({ broadcast: false, userPrompt })
+     res   = await dcm.signTransaction({ transaction: wcObj, inputPaths })
+     txid  = await provider.sendRawTransaction(res.signedTransaction)
+   Fees: placeholder inputs are counted at their final signed size, so
+   builder.getTransactionSize() gives a realistic size for the estimate.
+   ================================================================ */
+async function loadCashScript() {
+  if (csLib) return csLib;
+  csLib = await import('cashscript');
+  return csLib;
+}
+
+function electrumProvider() {
+  const { ElectrumNetworkProvider } = csLib;
+  return new ElectrumNetworkProvider(state.network, { hostname: ELECTRUM_HOSTNAME[state.network] });
+}
+
+// Pick the smallest set of pure-BCH UTXOs covering `needed` sats.
+async function selectFundingUtxos(provider, address, neededSats) {
+  const utxos = await provider.getUtxos(address);
+  const spendable = utxos.filter((u) => !u.token).sort((a, b) => Number(a.satoshis - b.satoshis));
+  const picked = [];
+  let total = 0n;
+  for (const u of spendable) {
+    picked.push(u);
+    total += u.satoshis;
+    if (total >= neededSats) break;
+  }
+  if (total < neededSats) {
+    throw new Error(`Insufficient funds: need ${neededSats} sats, wallet has ${total} spendable sats at ${address}. ` +
+      'Fund the wallet first (chipnet faucet: https://tbch.googol.cash).');
+  }
+  return { picked, total };
+}
+
+// Estimate fee at 2 sat/byte (covers the 1 sat/byte min relay fee with margin).
+function estimateFeeBytes(sizeBytes) { return BigInt(Math.max(250, Math.ceil(sizeBytes * 2))); }
+
+async function buildAndSign({ userPrompt, build }) {
+  // build(builder, ctx) adds inputs/outputs; returns { inputPaths, feeSats, summary }.
+  const cs = await loadCashScript();
+  const { TransactionBuilder, placeholderP2PKHUnlocker } = cs;
+  const provider = electrumProvider();
+  const builder = new TransactionBuilder({ provider });
+  const ctx = { provider, userAddress: state.wallet.address, placeholderP2PKHUnlocker };
+  const result = await build(builder, ctx);
+  // Size-based fee check: the builder already enforces >= 1 sat/byte on build().
+  const size = builder.getTransactionSize();
+  const fee = estimateFeeBytes(size);
+  const wcObj = builder.generateWcTransactionObject({ broadcast: false, userPrompt });
+  const dcm = state.wallet.dcm;
+  const res = await dcm.signTransaction({ transaction: wcObj, inputPaths: result.inputPaths });
+  if (res.error) throw new Error('Wallet refused to sign: ' + res.error);
+  if (!res.signedTransaction) throw new Error('Wallet returned no signed transaction.');
+  const txid = await provider.sendRawTransaction(res.signedTransaction);
+  return { txid, feeSats: fee, sizeBytes: size, summary: result.summary };
+}
+
+/* ---- Register a node (contract call) ---- */
+function buildCommitment(nodeId, status, height, latencyMs) {
+  const c = new Uint8Array(40);
+  c.set(nodeId, 0);
+  c[20] = status;
+  c.set(u32be(height), 21);
+  c.set(u16be(latencyMs), 25);
+  return c;
+}
+
+// Map the artifact's register-function inputs to concrete arguments.
+// The .cash contract is still being written by the contract agent; the
+// mapping below handles the shapes the DESIGN.md allows (a commitment
+// argument and/or an `action` argument) and throws a clear error for any
+// other shape instead of broadcasting a malformed transaction.
+function registerFunctionArgs(abiFn, commitment) {
+  const args = [];
+  for (const input of abiFn.inputs || []) {
+    const name = (input.name || '').toLowerCase();
+    const type = (input.type || '').toLowerCase();
+    if (name.includes('commit')) args.push(commitment);
+    else if (name.includes('action')) {
+      if (type.includes('int')) args.push(1n);
+      else if (type.includes('bytes')) args.push(new Uint8Array([1]));
+      else if (type.includes('string')) args.push('register');
+      else args.push(1n);
+    } else {
+      throw new Error(`Unsupported register-function input "${input.name}" (${input.type}) in the contract artifact — ` +
+        'the frontend does not know how to call this ABI yet. Update registerFunctionArgs() once the .cash source lands.');
+    }
+  }
+  return args;
+}
+
+async function loadArtifact() {
+  if (state.artifact) return state.artifact;
+  const file = state.config.artifactFile || 'NodeWatchRegistry.json';
+  const r = await fetch(file, { cache: 'no-store' });
+  if (!r.ok) throw new Error(`Contract artifact "${file}" not found (HTTP ${r.status}) — the contract agent has not published it yet.`);
+  state.artifact = await r.json();
+  return state.artifact;
+}
+
+async function registerNode(ev) {
+  ev.preventDefault();
+  const msg = $('form-msg');
+  if (!state.config.deployed || !state.config.contractAddress || !state.config.registryCategoryId) {
+    msg.textContent = 'Contract not deployed yet — nothing to write to.';
+    return;
+  }
+  if (!state.wallet.connected) {
+    msg.textContent = 'Connect a wallet first (Paytaca via WizardConnect).';
+    return;
+  }
+  const name = $('node-name').value.trim();
+  const endpoint = $('node-endpoint').value.trim();
+  if (!name || !endpoint) { msg.textContent = 'Name and endpoint are both required.'; return; }
+  const opReturnText = `${name}|${endpoint}`;
+  if (new TextEncoder().encode(opReturnText).length > 180) {
+    msg.textContent = 'Name + endpoint too long for the 220-byte OP_RETURN payload — shorten them.';
+    return;
+  }
+  try {
+    msg.textContent = 'Loading contract artifact…';
+    const artifact = await loadArtifact();
+    const cs = await loadCashScript();
+    const { Contract } = cs;
+    const provider = electrumProvider();
+    const contract = new Contract(artifact, [], { provider });
+    if (contract.address.toLowerCase() !== state.config.contractAddress.toLowerCase()) {
+      throw new Error(`Artifact address ${contract.address} does not match config.json contractAddress ${state.config.contractAddress}. Refusing to build — check the deployment.`);
+    }
+    const abiFn = (artifact.abi || []).find((f) => f.name === 'register') || (artifact.abi || [])[0];
+    if (!abiFn) throw new Error('Contract artifact has no ABI functions.');
+    const nodeId = await nodeIdFor(name, endpoint);
+    const commitment = buildCommitment(nodeId, 1, state.tipHeight || 0, state.lastProbeLatencyMs || 0);
+    // Find the contract UTXO holding the minting NFT.
+    const contractUtxos = await contract.getUtxos();
+    const mintUtxo = contractUtxos.find((u) =>
+      u.token && u.token.category === state.config.registryCategoryId &&
+      (u.token.nft && (u.token.nft.capability === 'minting' || u.token.nft.capability === 2)));
+    if (!mintUtxo) throw new Error('No minting-NFT UTXO found at the contract address — the registry may not be funded/initialised yet.');
+    const unlocker = contract.unlock[abiFn.name](...registerFunctionArgs(abiFn, commitment));
+    msg.textContent = 'Building transaction — estimating cost…';
+    const { txid, feeSats, sizeBytes } = await buildAndSign({
+      userPrompt: 'Register node',
+      build: async (builder, ctx) => {
+        builder.addInput(mintUtxo, unlocker);
+        // Covenant outputs (must match the .cash contract; see note in code):
+        // 1) minting NFT back to the contract (same locking script + category),
+        // 2) the new mutable node NFT to the registrant (holder = write permission),
+        // 3) NWATCH|R OP_RETURN with name + endpoint.
+        builder.addOutput({
+          to: contract.tokenAddress,
+          amount: mintUtxo.satoshis,
+          token: { category: state.config.registryCategoryId, amount: 0n, nft: { capability: 'minting', commitment: mintUtxo.token.nft.commitment } },
+        });
+        builder.addOutput({
+          to: ctx.userAddress,
+          amount: 1000n,
+          token: { category: state.config.registryCategoryId, amount: 0n, nft: { capability: 'mutable', commitment: binToHex(commitment) } },
+        });
+        builder.addOpReturnOutput([ascii('NWATCH'), new Uint8Array([1]), ascii('R'), nodeId, ascii(opReturnText)]);
+        // Funding: user inputs + change. 1000 (NFT dust) + fee headroom; the
+        // exact fee is computed from the built size below and shown before signing.
+        const need = 1000n + 1000n;
+        const { picked, total } = await selectFundingUtxos(ctx.provider, ctx.userAddress, need);
+        const inputPaths = [];
+        for (const u of picked) {
+          builder.addInput(u, ctx.placeholderP2PKHUnlocker(ctx.userAddress));
+          inputPaths.push([0, 'receive', 0]);
+        }
+        // +40 bytes headroom: the change output below is not in the size yet.
+        const estFee = estimateFeeBytes(builder.getTransactionSize() + 40);
+        const change = total - 1000n - estFee;
+        if (change >= 546n) builder.addOutput({ to: ctx.userAddress, amount: change });
+        const summary = `register "${name}" (${endpoint})\n` +
+          `nodeId: ${binToHex(nodeId)}\n` +
+          `outputs: minting NFT -> contract (${mintUtxo.satoshis} sats), node NFT -> you (1000 sats), OP_RETURN NWATCH|R\n` +
+          `size ~${builder.getTransactionSize()} bytes, fee ~${estFee} sats ${satsToUsd(Number(estFee))}\n` +
+          `total cost ~${1000n + estFee} sats ${satsToUsd(Number(1000n + estFee))}`;
+        $('tx-preview').textContent = summary;
+        $('tx-preview-wrap').hidden = false;
+        return { inputPaths, summary };
+      },
+    });
+    msg.innerHTML = `Registered! Tx <a class="mono" href="${esc(EXPLORER_TX[state.network](txid))}" target="_blank" rel="noopener">${esc(txid)}</a> ` +
+      `· fee ~${feeSats} sats · size ~${sizeBytes} B`;
+    refreshNodes();
+  } catch (e) {
+    msg.textContent = 'Registration failed: ' + (e.message || e);
+  }
+}
+
+/* ---- Health attest (pure OP_RETURN, no contract needed) ---- */
+async function attestHealth(ev) {
+  ev.preventDefault();
+  const msg = $('attest-msg');
+  if (!state.wallet.connected) { msg.textContent = 'Connect a wallet first.'; return; }
+  const raw = $('attest-node').value.trim();
+  const latencyInput = parseInt(($('attest-latency').value || '').trim(), 10);
+  const latencyMs = Number.isFinite(latencyInput) ? latencyInput : (state.lastProbeLatencyMs || 0);
+  let nodeId;
+  try {
+    if (/^[0-9a-fA-F]{40}$/.test(raw)) nodeId = hexToBin(raw.toLowerCase());
+    else if (raw.includes('|')) {
+      const [n, e] = raw.split('|');
+      nodeId = await nodeIdFor(n.trim(), e.trim());
+    } else {
+      throw new Error('Enter "name|endpoint" or a 40-hex-char nodeId.');
+    }
+  } catch (e) { msg.textContent = 'Attestation failed: ' + (e.message || e); return; }
+  try {
+    msg.textContent = 'Building attestation…';
+    const height = state.tipHeight || 0;
+    const ts = Math.floor(Date.now() / 1000);
+    const { txid, feeSats } = await buildAndSign({
+      userPrompt: 'Health attestation',
+      build: async (builder, ctx) => {
+        builder.addOpReturnOutput([
+          ascii('NWATCH'), new Uint8Array([1]), ascii('H'), nodeId, u32be(height), u16be(latencyMs), u32be(ts),
+        ]);
+        const { picked, total } = await selectFundingUtxos(ctx.provider, ctx.userAddress, 300n);
+        const inputPaths = [];
+        for (const u of picked) {
+          builder.addInput(u, ctx.placeholderP2PKHUnlocker(ctx.userAddress));
+          inputPaths.push([0, 'receive', 0]);
+        }
+        const estFee = estimateFeeBytes(builder.getTransactionSize() + 40); // +40 B headroom for the change output
+        const change = total - estFee;
+        if (change >= 546n) builder.addOutput({ to: ctx.userAddress, amount: change });
+        return { inputPaths, summary: `attest nodeId ${binToHex(nodeId)} @ height ${height}, ${latencyMs} ms` };
+      },
+    });
+    msg.innerHTML = `Attested! Tx <a class="mono" href="${esc(EXPLORER_TX[state.network](txid))}" target="_blank" rel="noopener">${esc(txid)}</a> · fee ~${feeSats} sats ${satsToUsd(Number(feeSats))}`;
+    refreshNodes();
+  } catch (e) {
+    msg.textContent = 'Attestation failed: ' + (e.message || e);
+  }
+}
+
+/* ================================================================
+   Network toggle + init
+   ================================================================ */
+function setNetwork(net) {
+  state.network = net;
+  $('net-chipnet').classList.toggle('active', net === 'chipnet');
+  $('net-mainnet').classList.toggle('active', net === 'mainnet');
+  $('net-note').textContent = net === 'chipnet'
+    ? 'chipnet is the test network — no real money moves here.'
+    : 'mainnet — real BCH. Registering costs real sats; the wallet prompt always shows the exact amount first.';
+  if (state.wallet.connected) disconnectWallet(); // never reuse a wallet session across networks
+  state.tipHeight = null;
+  state.lastProbeLatencyMs = null;
+  refreshStats();
+  refreshNodes();
+  refreshProbes();
+}
+
+$('net-chipnet').addEventListener('click', () => setNetwork('chipnet'));
+$('net-mainnet').addEventListener('click', () => setNetwork('mainnet'));
+$('connect-btn').addEventListener('click', connectWallet);
+$('disconnect-btn').addEventListener('click', disconnectWallet);
+$('add-form').addEventListener('submit', registerNode);
+$('attest-form').addEventListener('submit', attestHealth);
+$('wc-copy').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText($('wc-uri').value); $('wc-copy').textContent = 'Copied!'; }
+  catch (_) { $('wc-uri').select(); $('wc-copy').textContent = 'Select + copy the URI above'; }
+});
+
+await loadConfig();
+await fetchPrice();
+setNetwork(state.config.network === 'mainnet' ? 'mainnet' : 'chipnet');
+setInterval(refreshStats, REFRESH_MS);
+setInterval(refreshNodes, REFRESH_MS);
+setInterval(refreshProbes, REFRESH_MS);
+</script>
+</body>
+</html>
