@@ -1,0 +1,10 @@
+{
+  "network": "chipnet",
+  "categoryId": "7996b0b388cf3929d8cadcffa812ca518a4b591d4f6fcb064cffbec863b22eb8",
+  "genesisTxid": "6bb05691ed2b8d8674dbacf53e141ed179634fac30e9e530484e6c22ec438dc0",
+  "genesisTxHex": "0200000001b82eb263c8beff4c06cb6f4f1d594b8a51ca12a8ffdccad82939cf88b3b09679000000006441ede94c279d589a0dd410a4147be8c4ca2d5356e58b3a61fd6ea1f03f64dac3a57a572eb5f0a924e3ab53090f4e3afc8faf64ff8343a8ac66fc426fa26bb543cf61210277cbd64dbcfd35a1e1a48349b0fb45174501704d1bc8579cd83fe0b20a5a68a6feffffff02e8030000000000003befb82eb263c8beff4c06cb6f4f1d594b8a51ca12a8ffdccad82939cf88b3b096792276a914b98e8c1ce82b85666f163d9a1d06079d8b131df688acfc760f00000000001976a914b98e8c1ce82b85666f163d9a1d06079d8b131df688ac00000000",
+  "feeSats": 500,
+  "faucetTxid": "7996b0b388cf3929d8cadcffa812ca518a4b591d4f6fcb064cffbec863b22eb8",
+  "faucetVout": 0,
+  "note": "Broadcast this hex from the browser. Verify the faucet UTXO is vout 0 via Electrum listunspent before broadcasting; if it is vout 1, DO NOT broadcast — rebuild after a self-send hop."
+}
