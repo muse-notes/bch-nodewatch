@@ -1,0 +1,91 @@
+pragma cashscript ^0.14.0;
+
+// NodeWatchRegistry — locks the registry minting NFT of one CashToken category.
+//
+// One category = one registry. The minting NFT lives in this contract UTXO.
+// Anyone may call register() to mint exactly one new mutable NFT (one node)
+// with a 40-byte commitment, and the tx must carry an NWATCH OP_RETURN
+// attestation (name + endpoint). The minting NFT is recreated to this same
+// contract, with the same value and commitment, so the registry can be used
+// again. No constructor arguments: the category is read from the minting
+// NFT input itself, so one contract deployment serves one category at a time
+// (the deployed instance is funded with that category's minting NFT).
+//
+// NFT commitment layout (40 bytes, enforced below):
+//   bytes 0-19 : nodeId = first 20 bytes of sha256(name + "|" + endpoint)
+//   byte  20   : status (1 = active, 2 = degraded)
+//   bytes 21-24: lastSeenHeight, uint32 big-endian
+//   bytes 25-26: latencyMs, uint16 big-endian
+//   bytes 27-39: reserved, zero
+//
+// Fixed output layout (kept deliberately rigid so the covenant is auditable):
+//   output 0: minting NFT recreated to this contract (same locking script,
+//             same token category + minting capability, same commitment,
+//             same value)
+//   output 1: the new mutable NFT (same category, mutable capability,
+//             40-byte commitment with status 1 or 2, >= 1000 sats)
+//   output 2: OP_RETURN starting with the bytes "NWATCH" (0x4e5741544348)
+//   output 3: optional BCH change, must carry no token
+contract NodeWatchRegistry() {
+    function register() {
+        // The contract input must be input 0.
+        require(this.activeInputIndex == 0);
+
+        // --- The spent input must hold the minting NFT. ---
+        // tokenCategory introspection returns category (32 bytes) plus the
+        // capability byte when the NFT has one (0x02 = minting).
+        bytes category, bytes capability = tx.inputs[0].tokenCategory.split(32);
+        require(capability == 0x02);
+
+        bytes contractLock = tx.inputs[0].lockingBytecode;
+
+        // --- Output 0: minting NFT recreated to this same contract. ---
+        require(tx.outputs[0].lockingBytecode == contractLock);
+        require(tx.outputs[0].tokenCategory == tx.inputs[0].tokenCategory);
+        require(tx.outputs[0].nftCommitment == tx.inputs[0].nftCommitment);
+        // The contract's BCH balance is preserved; the caller pays the fee
+        // (and the new NFT's dust) from their own inputs.
+        require(tx.outputs[0].value == tx.inputs[0].value);
+
+        // --- Output 1: exactly one new mutable NFT of the same category. ---
+        bytes newCategory, bytes newCapability = tx.outputs[1].tokenCategory.split(32);
+        require(newCategory == category);
+        require(newCapability == 0x01); // 0x01 = mutable
+        require(tx.outputs[1].value >= 1000);
+
+        // Commitment must be exactly 40 bytes: split it into the documented
+        // fields and require the 13-byte reserved tail to be all zeros, which
+        // pins the total length (a longer commitment would leave a longer
+        // tail and fail the equality; a shorter one fails the splits).
+        bytes commitment = tx.outputs[1].nftCommitment;
+        bytes nodeId, bytes tail1 = commitment.split(20);
+        bytes statusByte, bytes tail2 = tail1.split(1);
+        bytes heightBytes, bytes tail3 = tail2.split(4);
+        bytes latencyBytes, bytes reserved = tail3.split(2);
+        require(reserved == 0x00000000000000000000000000); // 13 zero bytes
+        int status = int(statusByte);
+        require(status == 1 || status == 2);
+        // Fields are parsed (and length-checked) above; nodeId / height /
+        // latency carry no further on-chain constraint.
+        require(nodeId == nodeId);
+        require(heightBytes == heightBytes);
+        require(latencyBytes == latencyBytes);
+
+        // --- Output 2: NWATCH OP_RETURN attestation. ---
+        // Built with one push per chunk, so the script always starts
+        // 0x6a (OP_RETURN) 0x06 (push 6) "NWATCH" (0x4e5741544348).
+        bytes opReturnPrefix = tx.outputs[2].lockingBytecode.split(8)[0];
+        require(opReturnPrefix == 0x6a064e5741544348);
+        require(tx.outputs[2].value == 0);
+        require(tx.outputs[2].tokenCategory == 0x);
+
+        // --- No other outputs except optional token-free change. ---
+        // This also guarantees exactly one new NFT is minted: output 0 is
+        // the recreated minting NFT, output 1 the new mutable NFT, and
+        // outputs 2-3 carry no token.
+        require(tx.outputs.length == 3 || tx.outputs.length == 4);
+        if (tx.outputs.length == 4) {
+            require(tx.outputs[3].tokenCategory == 0x);
+        }
+    }
+}

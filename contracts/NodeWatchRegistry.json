@@ -1,0 +1,45 @@
+{
+  "contractName": "NodeWatchRegistry",
+  "constructorInputs": [],
+  "abi": [
+    { "name": "register", "inputs": [] }
+  ],
+  "bytecode": "OP_INPUTINDEX OP_0 OP_NUMEQUALVERIFY OP_0 OP_UTXOTOKENCATEGORY 20 OP_SPLIT OP_2 OP_EQUALVERIFY OP_0 OP_UTXOBYTECODE OP_0 OP_OUTPUTBYTECODE OP_EQUALVERIFY OP_0 OP_OUTPUTTOKENCATEGORY OP_0 OP_UTXOTOKENCATEGORY OP_EQUALVERIFY OP_0 OP_OUTPUTTOKENCOMMITMENT OP_0 OP_UTXOTOKENCOMMITMENT OP_EQUALVERIFY OP_0 OP_OUTPUTVALUE OP_0 OP_UTXOVALUE OP_NUMEQUALVERIFY OP_1 OP_OUTPUTTOKENCATEGORY 20 OP_SPLIT OP_SWAP OP_ROT OP_EQUALVERIFY OP_1 OP_EQUALVERIFY OP_1 OP_OUTPUTVALUE e803 OP_GREATERTHANOREQUAL OP_VERIFY OP_1 OP_OUTPUTTOKENCOMMITMENT 14 OP_SPLIT OP_1 OP_SPLIT OP_4 OP_SPLIT OP_2 OP_SPLIT 00000000000000000000000000 OP_EQUALVERIFY OP_ROT OP_BIN2NUM OP_DUP OP_1 OP_NUMEQUAL OP_SWAP OP_2 OP_NUMEQUAL OP_BOOLOR OP_VERIFY OP_2 OP_PICK OP_3 OP_ROLL OP_EQUALVERIFY OP_OVER OP_ROT OP_EQUALVERIFY OP_DUP OP_EQUALVERIFY OP_2 OP_OUTPUTBYTECODE OP_8 OP_SPLIT OP_DROP 6a064e5741544348 OP_EQUALVERIFY OP_2 OP_OUTPUTVALUE OP_0 OP_NUMEQUALVERIFY OP_2 OP_OUTPUTTOKENCATEGORY OP_0 OP_EQUALVERIFY OP_TXOUTPUTCOUNT OP_3 OP_NUMEQUAL OP_TXOUTPUTCOUNT OP_4 OP_NUMEQUAL OP_BOOLOR OP_VERIFY OP_TXOUTPUTCOUNT OP_4 OP_NUMEQUAL OP_IF OP_3 OP_OUTPUTTOKENCATEGORY OP_0 OP_EQUALVERIFY OP_ENDIF OP_1",
+  "source": "pragma cashscript ^0.14.0;\n\n// NodeWatchRegistry — locks the registry minting NFT of one CashToken category.\n//\n// One category = one registry. The minting NFT lives in this contract UTXO.\n// Anyone may call register() to mint exactly one new mutable NFT (one node)\n// with a 40-byte commitment, and the tx must carry an NWATCH OP_RETURN\n// attestation (name + endpoint). The minting NFT is recreated to this same\n// contract, with the same value and commitment, so the registry can be used\n// again. No constructor arguments: the category is read from the minting\n// NFT input itself, so one contract deployment serves one category at a time\n// (the deployed instance is funded with that category's minting NFT).\n//\n// NFT commitment layout (40 bytes, enforced below):\n//   bytes 0-19 : nodeId = first 20 bytes of sha256(name + \"|\" + endpoint)\n//   byte  20   : status (1 = active, 2 = degraded)\n//   bytes 21-24: lastSeenHeight, uint32 big-endian\n//   bytes 25-26: latencyMs, uint16 big-endian\n//   bytes 27-39: reserved, zero\n//\n// Fixed output layout (kept deliberately rigid so the covenant is auditable):\n//   output 0: minting NFT recreated to this contract (same locking script,\n//             same token category + minting capability, same commitment,\n//             same value)\n//   output 1: the new mutable NFT (same category, mutable capability,\n//             40-byte commitment with status 1 or 2, >= 1000 sats)\n//   output 2: OP_RETURN starting with the bytes \"NWATCH\" (0x4e5741544348)\n//   output 3: optional BCH change, must carry no token\ncontract NodeWatchRegistry() {\n    function register() {\n        // The contract input must be input 0.\n        require(this.activeInputIndex == 0);\n\n        // --- The spent input must hold the minting NFT. ---\n        // tokenCategory introspection returns category (32 bytes) plus the\n        // capability byte when the NFT has one (0x02 = minting).\n        bytes category, bytes capability = tx.inputs[0].tokenCategory.split(32);\n        require(capability == 0x02);\n\n        bytes contractLock = tx.inputs[0].lockingBytecode;\n\n        // --- Output 0: minting NFT recreated to this same contract. ---\n        require(tx.outputs[0].lockingBytecode == contractLock);\n        require(tx.outputs[0].tokenCategory == tx.inputs[0].tokenCategory);\n        require(tx.outputs[0].nftCommitment == tx.inputs[0].nftCommitment);\n        // The contract's BCH balance is preserved; the caller pays the fee\n        // (and the new NFT's dust) from their own inputs.\n        require(tx.outputs[0].value == tx.inputs[0].value);\n\n        // --- Output 1: exactly one new mutable NFT of the same category. ---\n        bytes newCategory, bytes newCapability = tx.outputs[1].tokenCategory.split(32);\n        require(newCategory == category);\n        require(newCapability == 0x01); // 0x01 = mutable\n        require(tx.outputs[1].value >= 1000);\n\n        // Commitment must be exactly 40 bytes: split it into the documented\n        // fields and require the 13-byte reserved tail to be all zeros, which\n        // pins the total length (a longer commitment would leave a longer\n        // tail and fail the equality; a shorter one fails the splits).\n        bytes commitment = tx.outputs[1].nftCommitment;\n        bytes nodeId, bytes tail1 = commitment.split(20);\n        bytes statusByte, bytes tail2 = tail1.split(1);\n        bytes heightBytes, bytes tail3 = tail2.split(4);\n        bytes latencyBytes, bytes reserved = tail3.split(2);\n        require(reserved == 0x00000000000000000000000000); // 13 zero bytes\n        int status = int(statusByte);\n        require(status == 1 || status == 2);\n        // Fields are parsed (and length-checked) above; nodeId / height /\n        // latency carry no further on-chain constraint.\n        require(nodeId == nodeId);\n        require(heightBytes == heightBytes);\n        require(latencyBytes == latencyBytes);\n\n        // --- Output 2: NWATCH OP_RETURN attestation. ---\n        // Built with one push per chunk, so the script always starts\n        // 0x6a (OP_RETURN) 0x06 (push 6) \"NWATCH\" (0x4e5741544348).\n        bytes opReturnPrefix = tx.outputs[2].lockingBytecode.split(8)[0];\n        require(opReturnPrefix == 0x6a064e5741544348);\n        require(tx.outputs[2].value == 0);\n        require(tx.outputs[2].tokenCategory == 0x);\n\n        // --- No other outputs except optional token-free change. ---\n        // This also guarantees exactly one new NFT is minted: output 0 is\n        // the recreated minting NFT, output 1 the new mutable NFT, and\n        // outputs 2-3 carry no token.\n        require(tx.outputs.length == 3 || tx.outputs.length == 4);\n        if (tx.outputs.length == 4) {\n            require(tx.outputs[3].tokenCategory == 0x);\n        }\n    }\n}\n",
+  "fingerprint": "80c269d2a1c0b4e8d547b0e492fcff73566eb8351eade04fe68687ff95cb4d67",
+  "debug": {
+    "bytecode": "c0009d00ce01207f528800c700cd8800d100ce8800d200cf8800cc00c69d51d101207f7c7b88518851cc02e803a26951d201147f517f547f527f0d00000000000000000000000000887b8176519c7c529c9b695279537a88787b88768852cd587f75086a064e57415443488852cc009d52d10088c4539cc4549c9b69c4549c6353d100886851",
+    "sourceMap": "32:16:32:37;:41::42;:8::44:1;37:53:37:54:0;:43::69:1;:76::78:0;:43::79:1;38:30:38:34:0;:8::36:1;40:39:40:40:0;:29::57:1;43:27:43:28:0;:16::45:1;:8::63;44:27:44:28:0;:16::43:1;:57::58:0;:47::73:1;:8::75;45:27:45:28:0;:16::43:1;:57::58:0;:47::73:1;:8::75;48:27:48:28:0;:16::35:1;:49::50:0;:39::57:1;:8::59;51:60:51:61:0;:49::76:1;:83::85:0;:49::86:1;52:16:52:27:0;:31::39;:8::41:1;53:33:53:37:0;:8::39:1;54:27:54:28:0;:16::35:1;:39::43:0;:16:::1;:8::45;60:38:60:39:0;:27::54:1;61:53:61:55:0;:36::56:1;62:52:62:53:0;:40::54:1;63:53:63::0;:41::55:1;64:57:64:58:0;:45::59:1;65:28:65:56:0;:8::58:1;66:25:66:35:0;:21::36:1;67:16:67:22:0;:26::27;:16:::1;:31::37:0;:41::42;:31:::1;:16;:8::44;70:16:70:22:0;;:26::32;;:8::34:1;71:16:71:27:0;:31::42;:8::44:1;72:16:72::0;:8::46:1;77:42:77:43:0;:31::60:1;:67::68:0;:31::69:1;:::72;78:34:78:52:0;:8::54:1;79:27:79:28:0;:16::35:1;:39::40:0;:8::42:1;80:27:80:28:0;:16::43:1;:47::49:0;:8::51:1;86:16:86:33:0;:37::38;:16:::1;:42::59:0;:63::64;:42:::1;:16;:8::66;87:12:87:29:0;:33::34;:12:::1;:36:89:9:0;88:31:88:32;:20::47:1;:51::53:0;:12::55:1;87:36:89:9;30:24:90:5",
+    "logs": [],
+    "requires": [
+      { "ip": 2, "line": 32 },
+      { "ip": 8, "line": 38 },
+      { "ip": 13, "line": 43 },
+      { "ip": 18, "line": 44 },
+      { "ip": 23, "line": 45 },
+      { "ip": 28, "line": 48 },
+      { "ip": 35, "line": 52 },
+      { "ip": 37, "line": 53 },
+      { "ip": 42, "line": 54 },
+      { "ip": 54, "line": 65 },
+      { "ip": 64, "line": 67 },
+      { "ip": 69, "line": 70 },
+      { "ip": 72, "line": 71 },
+      { "ip": 74, "line": 72 },
+      { "ip": 81, "line": 78 },
+      { "ip": 85, "line": 79 },
+      { "ip": 89, "line": 80 },
+      { "ip": 97, "line": 86 },
+      { "ip": 105, "line": 88 }
+    ]
+  },
+  "compiler": {
+    "name": "cashc",
+    "version": "0.14.0",
+    "options": {
+      "enforceFunctionParameterTypes": true,
+      "enforceLocktimeGuard": true
+    }
+  },
+  "updatedAt": "2026-11-06T23:47:07.940Z"
+}
