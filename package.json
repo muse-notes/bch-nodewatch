@@ -1,0 +1,26 @@
+{
+  "name": "bch-nodewatch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "compile": "cashc contracts/NodeWatchRegistry.cash --output contracts/NodeWatchRegistry.json",
+    "make-wallet": "node scripts/make-wallet.mjs",
+    "genesis": "node scripts/genesis.mjs",
+    "deploy": "node scripts/deploy-contract.mjs",
+    "register": "node scripts/register-node.mjs",
+    "build-offline": "node scripts/build-offline-genesis.mjs && node scripts/build-offline-deploy.mjs && node scripts/build-offline-register.mjs",
+    "build-offline-genesis": "node scripts/build-offline-genesis.mjs",
+    "build-offline-deploy": "node scripts/build-offline-deploy.mjs",
+    "build-offline-register": "node scripts/build-offline-register.mjs"
+  },
+  "dependencies": {
+    "cashscript": "0.14.0",
+    "mainnet-js": "3.1.7"
+  },
+  "devDependencies": {
+    "cashc": "0.14.0",
+    "vitest": "3.2.4"
+  }
+}
